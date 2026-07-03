@@ -327,8 +327,6 @@ button { cursor: pointer; font-family: inherit; }
   display: flex;
   gap: 4px;
   justify-content: flex-end;
-  opacity: 0;
-  transition: opacity 0.1s;
 }
 
 
