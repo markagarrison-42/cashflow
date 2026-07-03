@@ -1,0 +1,21 @@
+# Database
+*.db
+*.db-journal
+
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# PA
+*.pyc
