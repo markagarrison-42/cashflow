@@ -72,11 +72,23 @@ export default function Transactions() {
     else { av = a[sortCol]; bv = b[sortCol]; }
     if (av < bv) return sortDir === "asc" ? -1 : 1;
     if (av > bv) return sortDir === "asc" ? 1 : -1;
-    return 0;
+    // Secondary sort: always sort by date desc within same group
+    return new Date(b.date) - new Date(a.date);
   });
 
-  const pastTxs = sorted.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d <= today; });
-  const futureTxs = sorted.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d > today; });
+  // Default view: sort by account name, then date desc within each account
+  const defaultSorted = sortCol === "date" 
+    ? [...sorted].sort((a, b) => {
+        const acctA = (a.account?.name || "").toLowerCase();
+        const acctB = (b.account?.name || "").toLowerCase();
+        if (acctA < acctB) return -1;
+        if (acctA > acctB) return 1;
+        return new Date(b.date) - new Date(a.date);
+      })
+    : sorted;
+
+  const pastTxs = defaultSorted.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d <= today; });
+  const futureTxs = defaultSorted.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d > today; });
 
   const cycleStatus = async (tx) => {
     if (tx.status === "reconciled") return;
