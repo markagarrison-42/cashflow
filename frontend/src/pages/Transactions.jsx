@@ -34,9 +34,10 @@ export default function Transactions() {
   const [sortCol, setSortCol] = useState("date");
   const [sortDir, setSortDir] = useState("desc");
   const [showFuture, setShowFuture] = useState(true);
+  const [collapsedAccounts, setCollapsedAccounts] = useState({});
 
   const load = () => {
-    const params = new URLSearchParams({ limit: "200" });
+    const params = new URLSearchParams({ limit: "500" });
     if (filters.type) params.set("transaction_type", filters.type);
     if (filters.account_id) params.set("account_id", filters.account_id);
     apiFetch(`/api/transactions/?${params}`).then(r => r.json()).then(setTxs);
@@ -48,6 +49,10 @@ export default function Transactions() {
   }, []);
 
   useEffect(() => { load(); }, [filters]);
+
+  const toggleAccount = (accountName) => {
+    setCollapsedAccounts(prev => ({ ...prev, [accountName]: !prev[accountName] }));
+  };
 
   const handleSort = (col) => {
     if (sortCol === col) {
@@ -61,6 +66,7 @@ export default function Transactions() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
+  // Sort transactions
   const sorted = [...(txs.items || [])].sort((a, b) => {
     let av, bv;
     if (sortCol === "date") { av = new Date(a.date); bv = new Date(b.date); }
@@ -72,23 +78,19 @@ export default function Transactions() {
     else { av = a[sortCol]; bv = b[sortCol]; }
     if (av < bv) return sortDir === "asc" ? -1 : 1;
     if (av > bv) return sortDir === "asc" ? 1 : -1;
-    // Secondary sort: always sort by date desc within same group
     return new Date(b.date) - new Date(a.date);
   });
 
-  // Default view: sort by account name, then date desc within each account
-  const defaultSorted = sortCol === "date" 
-    ? [...sorted].sort((a, b) => {
-        const acctA = (a.account?.name || "").toLowerCase();
-        const acctB = (b.account?.name || "").toLowerCase();
-        if (acctA < acctB) return -1;
-        if (acctA > acctB) return 1;
-        return new Date(b.date) - new Date(a.date);
-      })
-    : sorted;
+  // Group by account, sorted by date desc within each
+  const groupedByAccount = sorted.reduce((acc, tx) => {
+    const name = tx.account?.name || "Unknown";
+    if (!acc[name]) acc[name] = [];
+    acc[name].push(tx);
+    return acc;
+  }, {});
 
-  const pastTxs = defaultSorted.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d <= today; });
-  const futureTxs = defaultSorted.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d > today; });
+  // Sort account names alphabetically
+  const accountNames = Object.keys(groupedByAccount).sort();
 
   const cycleStatus = async (tx) => {
     if (tx.status === "reconciled") return;
@@ -149,8 +151,11 @@ export default function Transactions() {
   const TxRow = ({ tx }) => {
     const status = tx.status || "uncleared";
     const isReconciled = status === "reconciled";
+    const txDate = new Date(tx.date);
+    txDate.setHours(0, 0, 0, 0);
+    const isFuture = txDate > today;
     return (
-      <tr>
+      <tr style={{ opacity: isFuture ? 0.65 : 1 }}>
         <td>
           <button onClick={() => cycleStatus(tx)}
             title={isReconciled ? "Reconciled — locked" : `Mark as ${STATUS_NEXT[status]}`}
@@ -163,7 +168,6 @@ export default function Transactions() {
           <div>{tx.description || tx.merchant || "—"}</div>
           {tx.merchant && tx.description && <div className="muted small">{tx.merchant}</div>}
         </td>
-        <td className="muted">{tx.account?.name || "—"}</td>
         <td>{tx.category ? <span className="cat-badge" style={{ background: tx.category.color + "22", color: tx.category.color }}>{tx.category.name}</span> : "—"}</td>
         <td className={"right amount " + (tx.transaction_type === "income" ? "pos" : "neg")}>
           {tx.transaction_type === "income" ? "+" : "-"}{fmt(tx.amount)}
@@ -176,6 +180,86 @@ export default function Transactions() {
       </tr>
     );
   };
+
+  const AccountSection = ({ name, txList }) => {
+    const isCollapsed = collapsedAccounts[name];
+    const futureTxs = txList.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d > today; });
+    const pastTxs = txList.filter(tx => { const d = new Date(tx.date); d.setHours(0,0,0,0); return d <= today; });
+    const total = txList.reduce((s, tx) => tx.transaction_type === "income" ? s + tx.amount : s - tx.amount, 0);
+
+    return (
+      <div className="chart-card" style={{ marginBottom: 12, padding: 0, overflow: "hidden" }}>
+        {/* Account header */}
+        <button
+          onClick={() => toggleAccount(name)}
+          style={{
+            width: "100%", padding: "12px 16px", background: "var(--bg-2)",
+            border: "none", cursor: "pointer", display: "flex",
+            alignItems: "center", justifyContent: "space-between",
+            borderBottom: isCollapsed ? "none" : "1px solid var(--border)"
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ color: isCollapsed ? "var(--text-muted)" : "var(--accent)", fontSize: 13 }}>
+              {isCollapsed ? "▶" : "▼"}
+            </span>
+            <span style={{ fontWeight: 700, fontSize: 14 }}>{name}</span>
+            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{txList.length} transactions</span>
+          </div>
+          <span className={"amount " + (total < 0 ? "neg" : "pos")} style={{ fontSize: 14, fontWeight: 700 }}>
+            {fmt(Math.abs(total))}
+          </span>
+        </button>
+
+        {!isCollapsed && (
+          <table className="tx-table">
+            <thead>
+              <tr>
+                <th style={{ width: 28 }}>S</th>
+                <th style={thStyle} onClick={() => handleSort("date")}>Date <SortIcon col="date" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th style={thStyle} onClick={() => handleSort("description")}>Description <SortIcon col="description" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th style={thStyle} onClick={() => handleSort("category")}>Category <SortIcon col="category" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th className="right" style={thStyle} onClick={() => handleSort("amount")}>Amount <SortIcon col="amount" sortCol={sortCol} sortDir={sortDir} /></th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {futureTxs.length > 0 && (
+                <>
+                  <tr>
+                    <td colSpan={6} style={{ padding: 0 }}>
+                      <button onClick={() => setShowFuture(!showFuture)} style={{
+                        width: "100%", padding: "6px 10px", background: "var(--accent-dim)",
+                        border: "none", borderBottom: "2px solid var(--accent)", cursor: "pointer",
+                        color: "var(--accent)", fontSize: 11, fontWeight: 700,
+                        textTransform: "uppercase", letterSpacing: "0.5px",
+                        display: "flex", justifyContent: "space-between"
+                      }}>
+                        <span>↑ Future / Planned ({futureTxs.length})</span>
+                        <span>{showFuture ? "▲ Collapse" : "▼ Expand"}</span>
+                      </button>
+                    </td>
+                  </tr>
+                  {showFuture && futureTxs.map(tx => <TxRow key={tx.id} tx={tx} />)}
+                  <tr>
+                    <td colSpan={6} style={{ padding: "4px 10px", background: "var(--bg-2)", borderBottom: "1px solid var(--border)" }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                        ── Today & Past ──
+                      </span>
+                    </td>
+                  </tr>
+                </>
+              )}
+              {pastTxs.map(tx => <TxRow key={tx.id} tx={tx} />)}
+            </tbody>
+          </table>
+        )}
+      </div>
+    );
+  };
+
+  // When filtering by account, show flat view; otherwise show grouped
+  const isFiltered = !!filters.account_id;
 
   return (
     <div className="page">
@@ -277,57 +361,34 @@ export default function Transactions() {
         </div>
       )}
 
-      <div className="chart-card">
-        {sorted.length === 0 ? (
-          <div className="empty-state">No transactions found.</div>
-        ) : (
-          <table className="tx-table">
-            <thead>
-              <tr>
-                <th style={{ width: 28 }} title="Status">S</th>
-                <th style={thStyle} onClick={() => handleSort("date")}>Date <SortIcon col="date" sortCol={sortCol} sortDir={sortDir} /></th>
-                <th style={thStyle} onClick={() => handleSort("description")}>Description <SortIcon col="description" sortCol={sortCol} sortDir={sortDir} /></th>
-                <th style={thStyle} onClick={() => handleSort("account")}>Account <SortIcon col="account" sortCol={sortCol} sortDir={sortDir} /></th>
-                <th style={thStyle} onClick={() => handleSort("category")}>Category <SortIcon col="category" sortCol={sortCol} sortDir={sortDir} /></th>
-                <th className="right" style={thStyle} onClick={() => handleSort("amount")}>Amount <SortIcon col="amount" sortCol={sortCol} sortDir={sortDir} /></th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {/* Future transactions at top when sorted by date desc */}
-              {futureTxs.length > 0 && (
-                <>
-                  <tr>
-                    <td colSpan={7} style={{ padding: 0 }}>
-                      <button
-                        onClick={() => setShowFuture(!showFuture)}
-                        style={{
-                          width: "100%", padding: "7px 10px", background: "var(--accent-dim)",
-                          border: "none", borderBottom: "2px solid var(--accent)", cursor: "pointer",
-                          color: "var(--accent)", fontSize: 11, fontWeight: 700,
-                          textTransform: "uppercase", letterSpacing: "0.5px", textAlign: "left",
-                          display: "flex", justifyContent: "space-between"
-                        }}>
-                        <span>↑ Future / Planned ({futureTxs.length})</span>
-                        <span>{showFuture ? "▲ Collapse" : "▼ Expand"}</span>
-                      </button>
-                    </td>
-                  </tr>
-                  {showFuture && futureTxs.map(tx => <TxRow key={tx.id} tx={tx} />)}
-                  <tr>
-                    <td colSpan={7} style={{ padding: "4px 10px", background: "var(--bg-2)", borderBottom: "1px solid var(--border)" }}>
-                      <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-                        ── Today & Past ──
-                      </span>
-                    </td>
-                  </tr>
-                </>
-              )}
-              {pastTxs.map(tx => <TxRow key={tx.id} tx={tx} />)}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {/* Flat view when filtering by account, grouped view otherwise */}
+      {isFiltered ? (
+        <div className="chart-card">
+          {sorted.length === 0 ? (
+            <div className="empty-state">No transactions found.</div>
+          ) : (
+            <table className="tx-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 28 }}>S</th>
+                  <th style={thStyle} onClick={() => handleSort("date")}>Date <SortIcon col="date" sortCol={sortCol} sortDir={sortDir} /></th>
+                  <th style={thStyle} onClick={() => handleSort("description")}>Description <SortIcon col="description" sortCol={sortCol} sortDir={sortDir} /></th>
+                  <th style={thStyle} onClick={() => handleSort("category")}>Category <SortIcon col="category" sortCol={sortCol} sortDir={sortDir} /></th>
+                  <th className="right" style={thStyle} onClick={() => handleSort("amount")}>Amount <SortIcon col="amount" sortCol={sortCol} sortDir={sortDir} /></th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map(tx => <TxRow key={tx.id} tx={tx} />)}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ) : (
+        accountNames.map(name => (
+          <AccountSection key={name} name={name} txList={groupedByAccount[name]} />
+        ))
+      )}
     </div>
   );
 }
