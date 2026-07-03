@@ -160,6 +160,11 @@ export default function ImportYNAB({ onClose, onImported }) {
                   <div className="stat-value">{result.imported}</div>
                   <div className="stat-sub">transactions</div>
                 </div>
+                <div className="stat-card income" style={{gridColumn: "span 1"}}>
+                  <div className="stat-label">Duplicates skipped</div>
+                  <div className="stat-value">{result.duplicates || 0}</div>
+                  <div className="stat-sub">already existed</div>
+                </div>
                 <div className="stat-card neutral">
                   <div className="stat-label">Skipped</div>
                   <div className="stat-value">{result.skipped}</div>

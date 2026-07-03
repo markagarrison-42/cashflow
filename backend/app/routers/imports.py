@@ -34,11 +34,7 @@ def parse_ynab_date(date_str: str) -> datetime:
 def get_or_create_account(name: str, user_id: int, db: Session, cache: dict) -> models.Account:
     if name in cache:
         return cache[name]
-    account = db.query(models.Account).filter(
-        models.Account.user_id == user_id,
-        models.Account.name == name,
-        models.Account.is_active == True
-    ).first()
+    account = db.query(models.Account).filter_by(user_id=user_id, name=name).first()
     if not account:
         name_lower = name.lower()
         if any(w in name_lower for w in ["credit", "card", "visa", "mastercard", "amex"]):
@@ -52,11 +48,8 @@ def get_or_create_account(name: str, user_id: int, db: Session, cache: dict) -> 
         else:
             account_type = "checking"
         account = models.Account(
-            user_id=user_id,
-            name=name,
-            account_type=account_type,
-            balance=0.0,
-            currency="USD"
+            user_id=user_id, name=name,
+            account_type=account_type, balance=0.0, currency="USD"
         )
         db.add(account)
         db.flush()
@@ -77,7 +70,6 @@ async def import_ynab(
         text = contents.decode("latin-1")
 
     reader = csv.DictReader(io.StringIO(text))
-
     if reader.fieldnames is None:
         raise HTTPException(status_code=400, detail="Empty or invalid CSV file")
 
@@ -88,16 +80,27 @@ async def import_ynab(
 
     has_account_col = "Account" in headers
 
-    user_categories = db.query(models.Category).filter(
-        models.Category.user_id == current_user.id
-    ).all()
+    user_categories = db.query(models.Category).filter_by(user_id=current_user.id).all()
     cat_map = {c.name.lower(): c for c in user_categories}
 
+    # Build dedup set: (account_name, date_str, amount, payee)
+    existing = db.query(
+        models.Transaction.account_id,
+        models.Transaction.date,
+        models.Transaction.amount,
+        models.Transaction.description
+    ).join(models.Account).filter(
+        models.Account.user_id == current_user.id
+    ).all()
+
+    dedup_set = set()
+    for row in existing:
+        key = (row.account_id, row.date.strftime("%Y-%m-%d") if row.date else "", row.amount, (row.description or "").lower())
+        dedup_set.add(key)
+
     account_cache = {}
-    imported = 0
-    skipped = 0
-    errors = []
-    batch_count = 0
+    imported = skipped = dupes = 0
+    batch = 0
 
     for i, row in enumerate(reader, start=2):
         try:
@@ -112,45 +115,43 @@ async def import_ynab(
                 continue
 
             date = parse_ynab_date(date_str)
-            amount, tx_type = parse_ynab_amount(
-                row.get("Inflow", "0"),
-                row.get("Outflow", "0")
-            )
-
+            amount, tx_type = parse_ynab_amount(row.get("Inflow", "0"), row.get("Outflow", "0"))
             if amount == 0:
                 skipped += 1
                 continue
 
-            account_name = row.get("Account", "").strip() if has_account_col else "Imported Account"
+            account_name = row.get("Account", "").strip() if has_account_col else "Imported"
             if not account_name:
-                account_name = "Imported Account"
+                account_name = "Imported"
 
             account = get_or_create_account(account_name, current_user.id, db, account_cache)
 
-            ynab_category = (row.get("Category Group/Category", "") or row.get("Category", "")).strip()
+            # Deduplication check
+            dedup_key = (account.id, date.strftime("%Y-%m-%d"), amount, payee.lower())
+            if dedup_key in dedup_set:
+                dupes += 1
+                continue
+            dedup_set.add(dedup_key)
+
+            ynab_cat = (row.get("Category Group/Category", "") or "").strip()
             category_id = None
-            if ynab_category:
-                cat = cat_map.get(ynab_category.lower())
+            if ynab_cat:
+                cat = cat_map.get(ynab_cat.lower())
                 if not cat:
                     for name, c in cat_map.items():
-                        if name in ynab_category.lower() or ynab_category.lower() in name:
+                        if name in ynab_cat.lower() or ynab_cat.lower() in name:
                             cat = c
                             break
                 if cat:
                     category_id = cat.id
 
             memo = row.get("Memo", "").strip()
-            tx = models.Transaction(
-                account_id=account.id,
-                category_id=category_id,
-                amount=amount,
-                transaction_type=tx_type,
-                description=payee,
-                merchant=payee,
-                notes=memo if memo else None,
-                date=date,
-            )
-            db.add(tx)
+            db.add(models.Transaction(
+                account_id=account.id, category_id=category_id,
+                amount=amount, transaction_type=tx_type,
+                description=payee, merchant=payee,
+                notes=memo if memo else None, date=date,
+            ))
 
             if tx_type == "income":
                 account.balance += amount
@@ -158,19 +159,16 @@ async def import_ynab(
                 account.balance -= amount
 
             imported += 1
-            batch_count += 1
+            batch += 1
 
-            # Commit every BATCH_SIZE rows to avoid timeout
-            if batch_count >= BATCH_SIZE:
+            if batch >= BATCH_SIZE:
                 db.commit()
-                batch_count = 0
+                batch = 0
 
         except Exception as e:
-            errors.append(f"Row {i}: {str(e)}")
             skipped += 1
             continue
 
-    # Final commit
     db.commit()
 
     account_summaries = []
@@ -185,8 +183,9 @@ async def import_ynab(
     return {
         "imported": imported,
         "skipped": skipped,
+        "duplicates": dupes,
         "accounts": account_summaries,
-        "errors": errors[:10]
+        "errors": []
     }
 
 
@@ -204,7 +203,6 @@ async def preview_ynab(
 
     reader = csv.DictReader(io.StringIO(text))
     headers = [h.strip() for h in (reader.fieldnames or [])]
-
     all_rows = list(reader)
     accounts = list(set(r.get("Account", "").strip() for r in all_rows if r.get("Account", "").strip()))
     preview_rows = [{k.strip(): v.strip() for k, v in row.items()} for row in all_rows[:5]]
